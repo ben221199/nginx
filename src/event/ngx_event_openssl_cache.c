@@ -610,6 +610,14 @@ ngx_ssl_cache_cert_create(ngx_ssl_cache_key_t *id, char **err, void *data)
             return NULL;
         }
 
+        chain = sk_X509_new_null();
+        if (chain == NULL) {
+            *err = "sk_X509_new_null() failed";
+            return NULL;
+        }
+
+        /* certificate itself */
+
         x509 = NULL;
 
         while (x509 == NULL && !OSSL_STORE_eof(store)) {
@@ -633,17 +641,86 @@ ngx_ssl_cache_cert_create(ngx_ssl_cache_key_t *id, char **err, void *data)
             return NULL;
         }
 
-        chain = sk_X509_new_null();
-        if (chain == NULL) {
-            *err = "sk_X509_new_null() failed";
-            return NULL;
-        }
-
         if (sk_X509_push(chain, x509) == 0) {
             *err = "sk_X509_push() failed";
             X509_free(x509);
             sk_X509_pop_free(chain, X509_free);
             return NULL;
+        }
+
+        /* rest of the chain */
+
+        X509               *x509Subject;
+        X509_NAME          *x509Name;
+        OSSL_STORE_SEARCH  *search;
+        int                rv;
+
+        for ( ;; ) {
+            if (X509_check_issued(x509, x509) == X509_V_OK) {
+                /* self-signed */
+                break;
+            }
+
+            store = OSSL_STORE_open((char *) uri, NULL, NULL, NULL, NULL);
+
+            if (store == NULL) {
+                *err = "OSSL_STORE_open() failed";
+
+                return NULL;
+            }
+
+            x509Name = X509_get_issuer_name(x509);
+
+            search = OSSL_STORE_SEARCH_by_name(x509Name);
+
+            if (search == NULL) {
+                *err = "OSSL_STORE_SEARCH_by_name() failed";
+                X509_NAME_free(x509Name);
+                return NULL;
+            }
+
+            rv = OSSL_STORE_find(store, search);
+
+            if (rv == 0) {
+                *err = "OSSL_STORE_find() failed";
+                return NULL;
+            }
+
+            x509Subject = x509;
+            x509 = NULL;
+
+            while (x509 == NULL && !OSSL_STORE_eof(store)) {
+                info = OSSL_STORE_load(store);
+
+                if (info == NULL) {
+                    continue;
+                }
+
+                if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_CERT) {
+                    x509 = OSSL_STORE_INFO_get1_CERT(info);
+                }
+
+                OSSL_STORE_INFO_free(info);
+            }
+
+            OSSL_STORE_close(store);
+
+            if (x509 == NULL) {
+                /* no more certificates */
+                break;
+            }
+
+            if (X509_check_issued(x509, x509Subject) != X509_V_OK) {
+                *err = "X509_check_issued() failed";
+                return NULL;
+            }
+
+            if (sk_X509_push(chain, x509) == 0) {
+                *err = "sk_X509_push() failed";
+                X509_free(x509);
+                sk_X509_pop_free(chain, X509_free);
+                return NULL;
+            }
         }
 
         return chain;
