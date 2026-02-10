@@ -661,7 +661,7 @@ ngx_ssl_cache_cert_create(ngx_ssl_cache_key_t *id, char **err, void *data)
                 break;
             }
 
-            store = OSSL_STORE_open((char *) uri, NULL, NULL, NULL, NULL);
+            store = OSSL_STORE_open((char *) "pkcs11:", NULL, NULL, NULL, NULL);
 
             if (store == NULL) {
                 *err = "OSSL_STORE_open() failed";
