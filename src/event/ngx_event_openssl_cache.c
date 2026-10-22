@@ -460,12 +460,12 @@ ngx_ssl_cache_init_key(ngx_pool_t *pool, ngx_uint_t index, ngx_str_t *path,
     {
         id->type = NGX_SSL_CACHE_DATA;
 
-    } else if (index == NGX_SSL_CACHE_PKEY
+    } else if (index <= NGX_SSL_CACHE_PKEY
         && ngx_strncmp(path->data, "engine:", sizeof("engine:") - 1) == 0)
     {
         id->type = NGX_SSL_CACHE_ENGINE;
 
-    } else if (index == NGX_SSL_CACHE_PKEY
+    } else if (index <= NGX_SSL_CACHE_PKEY
         && ngx_strncmp(path->data, "store:", sizeof("store:") - 1) == 0)
     {
         id->type = NGX_SSL_CACHE_STORE;
@@ -582,6 +582,139 @@ ngx_ssl_cache_cert_create(ngx_ssl_cache_key_t *id, char **err, void *data)
     if (chain == NULL) {
         *err = "sk_X509_new_null() failed";
         return NULL;
+    }
+
+    if (id->type == NGX_SSL_CACHE_ENGINE) {
+
+#ifndef OPENSSL_NO_ENGINE
+
+        u_char  *p, *last;
+        ENGINE  *engine;
+
+        struct {
+            const char *cert_id;
+            X509 *cert;
+        } params = { NULL, NULL };
+
+        p = id->data + sizeof("engine:") - 1;
+        last = (u_char *) ngx_strchr(p, ':');
+
+        if (last == NULL) {
+            *err = "invalid syntax";
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        *last = '\0';
+
+        engine = ENGINE_by_id((char *) p);
+
+        *last++ = ':';
+
+        if (engine == NULL) {
+            *err = "ENGINE_by_id() failed";
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        /* certificate itself */
+
+        x509 = NULL;
+
+        params.cert_id = (const char *) last;
+
+        if (ENGINE_ctrl_cmd(engine, "LOAD_CERT_CTRL", 0, &params, NULL, 0)) {
+            x509 = params.cert;
+        }
+
+        if (x509 == NULL) {
+            *err = "ENGINE_ctrl_cmd(LOAD_CERT_CTRL) failed";
+            ENGINE_free(engine);
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        if (sk_X509_push(chain, x509) == 0) {
+            *err = "sk_X509_push() failed";
+            ENGINE_free(engine);
+            X509_free(x509);
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        ENGINE_free(engine);
+
+        return chain;
+
+#else
+
+        *err = "loading \"engine:...\" certificates is not supported";
+        sk_X509_pop_free(chain, X509_free);
+        return NULL;
+
+#endif
+    }
+
+    if (id->type == NGX_SSL_CACHE_STORE) {
+
+#ifdef ERR_R_OSSL_STORE_LIB
+
+        u_char           *uri;
+        OSSL_STORE_CTX   *store;
+        OSSL_STORE_INFO  *info;
+
+        uri = id->data + sizeof("store:") - 1;
+
+        store = OSSL_STORE_open((char *) uri, NULL, NULL, NULL, NULL);
+
+        if (store == NULL) {
+            *err = "OSSL_STORE_open() failed";
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        /* certificate itself */
+
+        x509 = NULL;
+
+        while (x509 == NULL && !OSSL_STORE_eof(store)) {
+            info = OSSL_STORE_load(store);
+
+            if (info == NULL) {
+                continue;
+            }
+
+            if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_CERT) {
+                x509 = OSSL_STORE_INFO_get1_CERT(info);
+            }
+
+            OSSL_STORE_INFO_free(info);
+        }
+
+        OSSL_STORE_close(store);
+
+        if (x509 == NULL) {
+            *err = "OSSL_STORE_load() failed";
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        if (sk_X509_push(chain, x509) == 0) {
+            *err = "sk_X509_push() failed";
+            X509_free(x509);
+            sk_X509_pop_free(chain, X509_free);
+            return NULL;
+        }
+
+        return chain;
+
+#else
+
+        *err = "loading \"store:...\" certificates is not supported";
+        sk_X509_pop_free(chain, X509_free);
+        return NULL;
+
+#endif
     }
 
     bio = ngx_ssl_cache_create_bio(id, err);
